@@ -1,0 +1,20 @@
+{
+  "ExampleModel-v1": {
+    "total": {
+      "answer_score": 0.85,
+      "ar_score": 0.85,
+      "count": 20
+    },
+    "by_type": {
+      "FB": {"answer_score": 0.9, "ar_score": 0.9, "count": 5},
+      "MC": {"answer_score": 1.0, "ar_score": 1.0, "count": 5},
+      "MS": {"answer_score": 0.6, "ar_score": 0.6, "count": 5},
+      "OE": {"answer_score": 0.7, "ar_score": 0.7, "count": 3},
+      "TF": {"answer_score": 1.0, "ar_score": 1.0, "count": 2}
+    },
+    "by_topic": {
+      "Algebra": {"answer_score": 0.9, "ar_score": 0.9, "count": 4},
+      "Geometry": {"answer_score": 0.8, "ar_score": 0.8, "count": 6}
+    }
+  }
+}
