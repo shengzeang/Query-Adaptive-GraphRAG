@@ -275,7 +275,7 @@ if __name__ == "__main__":
     question_type = ["FB", "MC", "MS", "OE", "TF"]
     # question_type = ["FB"]
 
-    original_path = "../CacheBlend/inputs/graphrag-bench/"
+    original_path = "./inputs/graphrag-bench/"
     original_data = load_original_data(original_path)
 
     base_path = "./outputs"

@@ -13,7 +13,7 @@ import pickle
 from raptor import Builder, BuilderConfig, Retriever, RetrieverConfig
 from model_for_test import LLAMASummarizationModel, LLAMAQAModel, SBertEmbeddingModel, MLP
 
-eval_dataset = load_dataset("./inputs/graphrag-bench/TF.json")
+eval_dataset = load_dataset("../inputs/graphrag-bench/OE.json")
 
 tree_num_layers = 2
 
@@ -22,10 +22,10 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 retriever_config = RetrieverConfig(qa_model=LLAMAQAModel(model_name),
                                   embedding_model=SBertEmbeddingModel())
 
-prefix_prompt = "You are given a statement. Determine whether the statement is True or False based on factual knowledge and logical reasoning.\
-        To make your decision, evaluate the statement's internal coherence and verify whether it aligns with known facts, entity relationships, \
-            and real-world logic (e.g., causal, temporal, taxonomic, or part-whole relations).\n"
-query_prompt = "Answer the question based on the given context.\n Only output True or False. Question: "
+prefix_prompt = "You are given an open-ended question that may require integrating information from multiple knowledge domains or conceptual subfields.\
+        Your task is to produce a detailed, comprehensive, and logically coherent response that demonstrates deep understanding, \
+            factual accuracy, and clear organization.\n"
+query_prompt = "Answer the question based on the given context.\n Question: "
 
 router = MLP(in_feats=768, hidden=64, out_feats=tree_num_layers+1, n_layers=3, dropout=0.5).to(torch.device("cuda:0"))
 optimizer = torch.optim.Adam(router.parameters(), lr=0.01, weight_decay=5e-5)
@@ -67,8 +67,8 @@ for epoch in range(1):
 
     print("---------------Result Summary---------------------")
     print(f"F1: {np.mean(f1_blend)}")
-    # write predictions to GraphRAG-Bench_TF.json in the current working directory
-    out_path = Path("outputs/GraphRAG-Bench_TF.json")
+    # write predictions to GraphRAG-Bench_OE.json in the current working directory
+    out_path = Path("../outputs/GraphRAG-Bench_OE.json")
     try:
         with open(out_path, 'w', encoding='utf-8') as out_f:
             json.dump(predictions, out_f, ensure_ascii=False, indent=2)

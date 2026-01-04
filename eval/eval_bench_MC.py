@@ -13,7 +13,7 @@ import pickle
 from raptor import Builder, BuilderConfig, Retriever, RetrieverConfig
 from model_for_test import LLAMASummarizationModel, LLAMAQAModel, SBertEmbeddingModel, MLP
 
-eval_dataset = load_dataset("./inputs/graphrag-bench/MC.json")
+eval_dataset = load_dataset("../inputs/graphrag-bench/MC.json")
 
 tree_num_layers = 2
 
@@ -70,7 +70,7 @@ for epoch in range(1):
     print("---------------Result Summary---------------------")
     print(f"F1: {np.mean(f1_blend)}")
     # write predictions to GraphRAG-Bench_MC.json in the current working directory
-    out_path = Path("outputs/GraphRAG-Bench_MC.json")
+    out_path = Path("../outputs/GraphRAG-Bench_MC.json")
     try:
         with open(out_path, 'w', encoding='utf-8') as out_f:
             json.dump(predictions, out_f, ensure_ascii=False, indent=2)

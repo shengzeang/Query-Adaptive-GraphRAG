@@ -13,7 +13,7 @@ import pickle
 from raptor import Builder, BuilderConfig, Retriever, RetrieverConfig
 from model_for_test import LLAMASummarizationModel, LLAMAQAModel, SBertEmbeddingModel, MLP
 
-eval_dataset = load_dataset("./inputs/graphrag-bench/MS.json")
+eval_dataset = load_dataset("../inputs/graphrag-bench/FB.json")
 
 tree_num_layers = 2
 
@@ -22,11 +22,12 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 retriever_config = RetrieverConfig(qa_model=LLAMAQAModel(model_name),
                                   embedding_model=SBertEmbeddingModel())
 
-prefix_prompt = "You are given a question with four answer options (A-D). Two to four of these options are correct. \
-    Your task is to: Select all options that are semantically accurate, factually consistent, and jointly coherent with the question. \
-        Integrate information across multiple related concepts or entities, reasoning over their relationships (e.g., part-of, causes, located-in, subclass-of).\
-            Reject distractors that are partially correct, contextually overlapping, or non-essential attributes that do not fully satisfy the query's meaning.\n"
-query_prompt = "Answer the question based on the given context.\n Only output the correct option letter. Question: "
+prefix_prompt = "You are given a sentence or a short paragraph that contains one or more blanks (__).\
+        Each blank should be filled with the most semantically approriate word or phrase that makes the text contextually coherent, \
+        factually grounded, and logically consistent.\n When deciding how to fill each blank, rely on local semantic cues \
+        (neighboring words, entities, and relations) and your background knowledge of real-world entities and their relationships \
+        (e.g., part-whole, cause-effect, temporal, taxonomic).\n"
+query_prompt = "Directly output the answer based on the given context. Answer shortly. DO NOT repeat the question or output any other words.\n Question: "
 
 router = MLP(in_feats=768, hidden=64, out_feats=tree_num_layers+1, n_layers=3, dropout=0.5).to(torch.device("cuda:0"))
 optimizer = torch.optim.Adam(router.parameters(), lr=0.01, weight_decay=5e-5)
@@ -43,8 +44,8 @@ for epoch in range(1):
     for ex in tqdm(eval_dataset):
         answers = ex["Answer"]
 
-        q = f"{normalize_question(ex['Question'])}\n Choices: A:{ex['Choices']['A']}; \
-                B:{ex['Choices']['B']}; C:{ex['Choices']['C']}; D:{ex['Choices']['D']}.\n"
+        q = normalize_question(ex["Question"])
+        # print(q)
         q_prompt = f"{query_prompt}{q}\nAnswer:"
 
         retriever = Retriever(retriever_config, tree)
@@ -59,6 +60,7 @@ for epoch in range(1):
         # choice = 2
 
         res = retriever.answer_question(question=user_prompt, start_layer=choice, num_layers=choice+1, collapse_tree=False)
+        # print(res)
         f1 = max([compute_f1(res, answer, tokenizer) for answer in answers])
         f1_blend.append(f1)
 
@@ -69,8 +71,8 @@ for epoch in range(1):
 
     print("---------------Result Summary---------------------")
     print(f"F1: {np.mean(f1_blend)}")
-    # write predictions to GraphRAG-Bench_MS.json in the current working directory
-    out_path = Path("outputs/GraphRAG-Bench_MS.json")
+    # write predictions to GraphRAG-Bench_FB.json in the current working directory
+    out_path = Path("../outputs/GraphRAG-Bench_FB.json")
     try:
         with open(out_path, 'w', encoding='utf-8') as out_f:
             json.dump(predictions, out_f, ensure_ascii=False, indent=2)
