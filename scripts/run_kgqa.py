@@ -1,10 +1,12 @@
-"""KGQA evaluation (HotpotQA / 2WikiMQA / MuSiQue): BM25, TF-IDF, RAPTOR and RAPTOR-QA (paper Table 4).
+"""KGQA evaluation (HotpotQA / 2WikiMQA / MuSiQue): RAPTOR and RAPTOR-QA (paper Table 4).
+
+The BM25 / TF-IDF baselines are not run by default: add them with ``--methods bm25 tfidf raptor raptor-qa``.
 
 Every question gets its own RAPTOR tree (built from its own paragraphs, cached under --cache-dir and
 shared by all methods). Results are appended to ``<out>/<dataset>.jsonl`` and the script can be resumed.
 
     python scripts/run_kgqa.py --dataset musique --n 1000 \
-        --methods bm25 tfidf raptor raptor-qa --routers generalist=checkpoints/generalist.pt --out outputs/kgqa
+        --methods raptor raptor-qa --routers generalist=checkpoints/generalist.pt --out outputs/kgqa
 
 The first ``--n-specialist`` (default 200) questions of the seeded shuffle are held out of the test set
 (``split_specialist_and_test``): they are not used by this pipeline, but keep the test questions identical to those of
@@ -57,7 +59,7 @@ def main():
     ap.add_argument("--n", type=int, default=1000, help="number of test questions")
     ap.add_argument("--n-specialist", type=int, default=200)
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--methods", nargs="+", default=["bm25", "tfidf", "raptor", "raptor-qa"])
+    ap.add_argument("--methods", nargs="+", default=["raptor", "raptor-qa"])
     ap.add_argument("--routers", nargs="*", default=[], help="name=checkpoint pairs used by raptor-qa")
     ap.add_argument("--max-new-tokens", type=int, default=256, help="room for the reasoning and the answer")
     ap.add_argument("--out", default="outputs/kgqa")

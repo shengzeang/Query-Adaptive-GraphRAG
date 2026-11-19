@@ -1,8 +1,10 @@
-"""GraphRAG-Bench evaluation (FB / MC / MS / TF / OE): BM25, TF-IDF, RAPTOR and RAPTOR-QA (paper Table 5).
+"""GraphRAG-Bench evaluation (FB / MC / MS / TF / OE): RAPTOR and RAPTOR-QA (paper Table 5).
+
+The BM25 / TF-IDF baselines are not run by default: add them with ``--methods bm25 tfidf raptor raptor-qa``.
 
     python scripts/build_bench_index.py --out indexes/graphrag_bench_c200.pkl
     python scripts/run_bench.py --tree indexes/graphrag_bench_c200.pkl \
-        --methods bm25 tfidf raptor raptor-qa --routers generalist=checkpoints/generalist.pt
+        --methods raptor raptor-qa --routers generalist=checkpoints/generalist.pt
 
 Predictions are written in the official format to ``<out>/<method>/GraphRAG-Bench_<TYPE>.json`` and
 scored with the official evaluation protocol (``qa_graphrag/bench_eval.py``; judge = DeepSeek flash,
@@ -101,7 +103,7 @@ def score(args, methods):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tree", default="indexes/graphrag_bench_c200.pkl")
-    ap.add_argument("--methods", nargs="+", default=["bm25", "tfidf", "raptor", "raptor-qa"])
+    ap.add_argument("--methods", nargs="+", default=["raptor", "raptor-qa"])
     ap.add_argument("--routers", nargs="*", default=[], help="name=checkpoint pairs used by raptor-qa")
     ap.add_argument("--tasks", nargs="+", default=QUESTION_TYPES, choices=QUESTION_TYPES)
     ap.add_argument("--limit", type=int, default=None, help="only the first N questions of each task (debugging)")

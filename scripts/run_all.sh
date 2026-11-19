@@ -17,20 +17,21 @@
 #   serve       launch the vLLM replicas (not part of `all`; idempotent)
 #   labels      router training data: 2000 questions each of HotpotQA(train) / NQ / TriviaQA, answered from every level
 #   train       Generalist router (HotpotQA + NQ + TriviaQA)
-#   kgqa        Table 4: BM25 / TF-IDF / RAPTOR / RAPTOR-QA on MuSiQue, 2WikiMQA, HotpotQA
+#   kgqa        Table 4: RAPTOR / RAPTOR-QA on MuSiQue, 2WikiMQA, HotpotQA (BM25 / TF-IDF only on request: KGQA_METHODS)
 #   bench_index shared RAPTOR tree over the 20 GraphRAG-Bench textbooks (chunks of $BENCH_CHUNK tokens, default 200;
 #               BENCH_CHUNK=1200 for the GraphRAG-Bench paper's size: cluster cap, context budget and the
 #               replicas' context window (VLLM_MAX_LEN, set when BENCH_CHUNK is exported for `serve` too) follow it)
-#   bench       Table 5: generation for FB/MC/MS/TF/OE + official scoring (judge = DeepSeek flash)
+#   bench       Table 5: RAPTOR / RAPTOR-QA, generation for FB/MC/MS/TF/OE + official scoring (judge = DeepSeek flash)
 #
 # Common switches (environment variables; see the comments below and README.md):
 #   RETRIEVAL=collapse|traverse   how raptor / raptor-qa retrieve (default collapse); labels, checkpoints and results depend on it
 #   TOP_K=5                       nodes per layer (traverse) / in total (collapse, BM25, TF-IDF); same dependency as RETRIEVAL
 #   DATA / CKPT / OUT_KGQA / OUT_BENCH   directories of labels / checkpoints / KGQA results / bench results
-#   KGQA_METHODS / KGQA_ROUTERS   restrict the kgqa stage, e.g. RAPTOR and RAPTOR-QA only: KGQA_METHODS="raptor raptor-qa"
-#                                 (KGQA_ROUTERS: name=checkpoint pairs, default generalist=$CKPT/generalist.pt)
+#   KGQA_METHODS / KGQA_ROUTERS   methods of the kgqa stage (default "raptor raptor-qa"; add the BM25 / TF-IDF baselines with
+#                                 KGQA_METHODS="bm25 tfidf raptor raptor-qa"); KGQA_ROUTERS: name=checkpoint pairs,
+#                                 default generalist=$CKPT/generalist.pt
 #   BENCH_CHUNK=200               GraphRAG-Bench chunk size in tokens (1200 = the benchmark paper's size)
-#   BENCH_METHODS / BENCH_ROUTERS / BENCH_TASKS   restrict the bench stage (methods, name=ckpt routers, tasks FB MC MS TF OE)
+#   BENCH_METHODS / BENCH_ROUTERS / BENCH_TASKS   the bench stage (methods, default "raptor raptor-qa"; name=ckpt routers; tasks FB MC MS TF OE)
 #   ENCODER_DEVICE=cpu            put the sentence encoder on the CPU (e.g. CUDA OOM next to a vLLM replica)
 #   SMOKE=1                       tiny end-to-end run, outputs under *_smoke/
 #
@@ -232,9 +233,9 @@ stage_train() {
 }
 
 stage_kgqa() {
-  # KGQA_METHODS / KGQA_ROUTERS: default all four methods with the Generalist router (from the `train` stage); e.g.
-  # KGQA_METHODS="raptor raptor-qa" for RAPTOR and RAPTOR-QA only. KGQA_ROUTERS: name=checkpoint pairs.
-  local methods="${KGQA_METHODS:-bm25 tfidf raptor raptor-qa}"
+  # KGQA_METHODS / KGQA_ROUTERS: default RAPTOR and RAPTOR-QA with the Generalist router (from the `train` stage); the
+  # BM25 / TF-IDF baselines only on request: KGQA_METHODS="bm25 tfidf raptor raptor-qa". KGQA_ROUTERS: name=checkpoint pairs.
+  local methods="${KGQA_METHODS:-raptor raptor-qa}"
   local routers="${KGQA_ROUTERS:-generalist=$CKPT/generalist.pt}"
   local d
   for d in musique 2wikimqa hotpotqa; do
@@ -261,9 +262,9 @@ stage_bench_index() {
 
 stage_bench() {
   log "bench (Table 5): generation + official scoring (chunks of $BENCH_CHUNK tokens, top-k $TOP_K, context budget $BENCH_MAX_TOKENS tokens)"
-  # BENCH_METHODS: default all four; BENCH_METHODS=raptor-qa with BENCH_ROUTERS="a=ckpt/a.pt b=ckpt/b.pt" compares routers
-  # (each becomes its own raptor-qa[name] directory; bm25 / tfidf / raptor are not run again)
-  local methods="${BENCH_METHODS:-bm25 tfidf raptor raptor-qa}"
+  # BENCH_METHODS: default RAPTOR and RAPTOR-QA ("bm25 tfidf raptor raptor-qa" adds the baselines); BENCH_METHODS=raptor-qa with
+  # BENCH_ROUTERS="a=ckpt/a.pt b=ckpt/b.pt" compares routers (each becomes its own raptor-qa[name] directory; raptor is not run again)
+  local methods="${BENCH_METHODS:-raptor raptor-qa}"
   local routers="${BENCH_ROUTERS:-generalist=$CKPT/generalist.pt}"
   # shellcheck disable=SC2086
   $PY scripts/run_bench.py --tree "$BENCH_TREE" --methods $methods \
