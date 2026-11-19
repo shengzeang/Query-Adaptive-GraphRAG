@@ -35,10 +35,6 @@ scripts/
   run_kgqa.py           KGQA experiments (MuSiQue / 2WikiMQA / HotpotQA)
   build_bench_index.py  shared RAPTOR tree over the 20 GraphRAG-Bench textbooks
   run_bench.py          GraphRAG-Bench experiments (generation + official scoring)
-  compare_runs.py       question-by-question comparison of two bench runs or of two routers (--pair)
-  tune_router.py        router diagnostics and hyper-parameter search (reads the labels only)
-  analyze_failures.py, measure_level_overlap.py, measure_chunk_size.py, count_duplicate_embeddings.py
-                        offline analyses (CPU only, no LLM calls)
 raptor/                 upstream RAPTOR package with fixes and additions (see "Changes to the upstream raptor package")
 tests/                  offline unit tests (`pytest tests`)
 ```
@@ -146,11 +142,10 @@ skipped, so adding a router to an existing run only generates and scores the new
 ```bash
 BENCH_METHODS=raptor-qa BENCH_ROUTERS="old=checkpoints/generalist.pt new=checkpoints_t10/generalist.pt" \
   bash scripts/run_all.sh bench
-python scripts/compare_runs.py outputs/bench outputs/bench --pair raptor-qa_old raptor-qa_new   # question by question
 ```
 
-(Routers trained with other `RETRIEVAL` / `TOP_K` produce a warning when used with the current setting.) Two runs, e.g. two
-settings on the same tree, are compared with `python scripts/compare_runs.py outputs/bench_a outputs/bench_b`.
+The scores of every router are in `$OUT_BENCH/summary.json`. (Routers trained with other `RETRIEVAL` / `TOP_K` produce a
+warning when used with the current setting.)
 
 ### Reading the results
 
