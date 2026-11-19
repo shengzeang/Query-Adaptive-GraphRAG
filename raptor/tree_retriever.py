@@ -8,7 +8,8 @@ from tenacity import retry, stop_after_attempt, wait_random_exponential
 from .EmbeddingModels import BaseEmbeddingModel, OpenAIEmbeddingModel
 from .Retrievers import BaseRetriever
 from .tree_structures import Node, Tree
-from .utils import (distances_from_embeddings, get_children, get_embeddings,
+from .utils import (SEGMENTS_SUFFIX, distances_from_embeddings,
+                    distances_to_nearest_segment, get_children, get_embeddings,
                     get_node_list, get_text,
                     indices_of_nearest_neighbors_from_distances,
                     reverse_mapping)
@@ -140,8 +141,6 @@ class TreeRetriever(BaseRetriever):
 
         self.tree_node_index_to_layer = reverse_mapping(self.tree.layer_to_nodes)
 
-        self.sibling_cooccur = 0
-
         logging.info(
             f"Successfully initialized TreeRetriever with Config {config.log_config()}"
         )
@@ -158,13 +157,24 @@ class TreeRetriever(BaseRetriever):
         """
         return self.embedding_model.create_embedding(text)
 
-    def retrieve_information_collapse_tree(self, query: str, top_k: int, max_tokens: int) -> str:
+    def node_distances(self, query_embedding, node_list: List[Node]) -> List[float]:
+        """Distances of the query to the nodes. A node with embeddings of several windows of its text (a text longer than
+        the encoder reads) is as close as its closest window; if no node has them this is the original computation."""
+        key = self.context_embedding_model
+        if not any(key + SEGMENTS_SUFFIX in n.embeddings for n in node_list):
+            return distances_from_embeddings(query_embedding, get_embeddings(node_list, key))
+        return distances_to_nearest_segment(
+            query_embedding, [n.embeddings.get(key + SEGMENTS_SUFFIX, n.embeddings[key]) for n in node_list]
+        )
+
+    def retrieve_information_collapse_tree(self, query: str, top_k: int, max_tokens: int, node_list=None) -> str:
         """
         Retrieves the most relevant information from the tree based on the query.
 
         Args:
             query (str): The query text.
             max_tokens (int): The maximum number of tokens.
+            node_list (List[Node], optional): The nodes to rank (default: every node of the tree).
 
         Returns:
             str: The context created using the most relevant nodes.
@@ -174,11 +184,10 @@ class TreeRetriever(BaseRetriever):
 
         selected_nodes = []
 
-        node_list = get_node_list(self.tree.all_nodes)
+        if node_list is None:
+            node_list = get_node_list(self.tree.all_nodes)
 
-        embeddings = get_embeddings(node_list, self.context_embedding_model)
-
-        distances = distances_from_embeddings(query_embedding, embeddings)
+        distances = self.node_distances(query_embedding, node_list)
 
         indices = indices_of_nearest_neighbors_from_distances(distances)
 
@@ -198,7 +207,11 @@ class TreeRetriever(BaseRetriever):
         return selected_nodes, context
 
     def retrieve_information(
-        self, current_nodes: List[Node], query: str, num_layers: int
+        self,
+        current_nodes: List[Node],
+        query: str,
+        num_layers: int,
+        max_tokens: int = None,
     ) -> str:
         """
         Retrieves the most relevant information from the tree based on the query.
@@ -207,6 +220,8 @@ class TreeRetriever(BaseRetriever):
             current_nodes (List[Node]): A List of the current nodes.
             query (str): The query text.
             num_layers (int): The number of layers to traverse.
+            max_tokens (int, optional): Token budget of the returned context. Nodes are
+                kept in retrieval order (start layer first) until the budget is used up.
 
         Returns:
             str: The context created using the most relevant nodes.
@@ -220,9 +235,7 @@ class TreeRetriever(BaseRetriever):
 
         for layer in range(num_layers):
 
-            embeddings = get_embeddings(node_list, self.context_embedding_model)
-
-            distances = distances_from_embeddings(query_embedding, embeddings)
+            distances = self.node_distances(query_embedding, node_list)
 
             indices = indices_of_nearest_neighbors_from_distances(distances)
 
@@ -248,6 +261,16 @@ class TreeRetriever(BaseRetriever):
                 # take the unique values
                 child_nodes = list(dict.fromkeys(child_nodes))
                 node_list = [self.tree.all_nodes[i] for i in child_nodes]
+
+        if max_tokens is not None:
+            kept, total_tokens = [], 0
+            for node in selected_nodes:
+                node_tokens = len(self.tokenizer.encode(node.text))
+                if kept and total_tokens + node_tokens > max_tokens:
+                    break
+                kept.append(node)
+                total_tokens += node_tokens
+            selected_nodes = kept
 
         context = get_text(selected_nodes)
         return selected_nodes, context
@@ -307,23 +330,10 @@ class TreeRetriever(BaseRetriever):
             selected_nodes, context = self.retrieve_information_collapse_tree(
                 query, top_k, max_tokens
             )
-            # print(selected_nodes)
-            selected_node_idx = []
-            for node in selected_nodes:
-                # print(node.index, node.children)
-                selected_node_idx.append(node.index)
-            for node in selected_nodes:
-                num_child = len(node.children)
-                if num_child != 0:
-                    for i in range(num_child):
-                        if i in selected_node_idx:
-                            for j in range(i+1, num_child):
-                                if j in selected_node_idx:
-                                    self.sibling_cooccur += 1
         else:
             layer_nodes = self.tree.layer_to_nodes[start_layer]
             selected_nodes, context = self.retrieve_information(
-                layer_nodes, query, num_layers
+                layer_nodes, query, num_layers, max_tokens
             )
 
         if return_layer_information:

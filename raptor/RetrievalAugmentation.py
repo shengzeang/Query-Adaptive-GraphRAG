@@ -86,7 +86,6 @@ class RetrievalAugmentationConfig:
                     "Only one of 'tb_summarization_model' or 'summarization_model' should be provided, not both."
                 )
             tb_summarization_model = summarization_model
-            tb_qa_model = qa_model
 
         # Set TreeBuilderConfig
         tree_builder_class, tree_builder_config_class = supported_tree_builders[
@@ -102,7 +101,6 @@ class RetrievalAugmentationConfig:
                 selection_mode=tb_selection_mode,
                 summarization_length=tb_summarization_length,
                 summarization_model=tb_summarization_model,
-                qa_model=tb_qa_model,
                 embedding_models=tb_embedding_models,
                 cluster_embedding_model=tb_cluster_embedding_model,
             )

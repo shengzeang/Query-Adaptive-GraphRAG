@@ -112,19 +112,23 @@ class ClusterTreeBuilder(TreeBuilder):
             summarization_length = self.summarization_length
             logging.info(f"Summarization Length: {summarization_length}")
 
-            if use_multithreading:
+            if use_multithreading or getattr(self, "parallel_summaries", False):
                 with ThreadPoolExecutor() as executor:
+                    futures = []
                     for cluster in clusters:
-                        executor.submit(
-                            process_cluster,
-                            cluster,
-                            new_level_nodes,
-                            next_node_index,
-                            summarization_length,
-                            lock,
+                        futures.append(
+                            executor.submit(
+                                process_cluster,
+                                cluster,
+                                new_level_nodes,
+                                next_node_index,
+                                summarization_length,
+                                lock,
+                            )
                         )
                         next_node_index += 1
-                    executor.shutdown(wait=True)
+                    for future in futures:
+                        future.result()  # re-raise worker exceptions
 
             else:
                 for cluster in clusters:

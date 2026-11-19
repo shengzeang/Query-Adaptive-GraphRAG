@@ -6,20 +6,10 @@ import numpy as np
 import tiktoken
 from scipy import spatial
 
-# from lmcache_vllm.blend_adapter import append_separator
-# from lmcache_vllm.vllm import SamplingParams
-
 from .tree_structures import Node
 
 # logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.ERROR)
-
-
-'''def precompute_kv(text_chunk, qa_llm):
-    sampling_params_prefix = SamplingParams(temperature=0.0,
-                                            max_tokens=1)
-    text_chunk = append_separator(text_chunk)
-    qa_llm.model.generate([text_chunk], sampling_params_prefix)'''
 
 
 def reverse_mapping(layer_to_nodes: Dict[int, List[Node]]) -> Dict[Node, int]:
@@ -31,7 +21,7 @@ def reverse_mapping(layer_to_nodes: Dict[int, List[Node]]) -> Dict[Node, int]:
 
 
 def split_text(
-    text: str, tokenizer: tiktoken.get_encoding("cl100k_base"), max_tokens: int, overlap: int = 0
+    text: str, tokenizer, max_tokens: int, overlap: int = 0
 ):
     """
     Splits the input text into smaller chunks based on the tokenizer and maximum allowed tokens.
@@ -145,6 +135,30 @@ def distances_from_embeddings(
     ]
 
     return distances
+
+
+# A node whose text is longer than the encoder reads keeps one embedding per window of its text under
+# ``<embedding key> + SEGMENTS_SUFFIX`` (a 2-d array) next to the single vector it has under the key itself.
+SEGMENTS_SUFFIX = "_segments"
+
+
+def distances_to_nearest_segment(query_embedding, embeddings) -> List[float]:
+    """Cosine distance between a query and nodes that have one embedding (1-d) or several (2-d, one per window of the
+    text): ``1 - max cosine`` over the windows, i.e. the query is compared with every window and the best one counts.
+    For nodes with a single vector this is the plain cosine distance."""
+    q = np.asarray(query_embedding, dtype=np.float64).ravel()
+    q = q / (np.linalg.norm(q) or 1.0)
+    rows, owner = [], []
+    for i, emb in enumerate(embeddings):
+        m = np.atleast_2d(np.asarray(emb, dtype=np.float64))
+        rows.append(m)
+        owner.extend([i] * len(m))
+    matrix = np.vstack(rows)
+    norms = np.linalg.norm(matrix, axis=1)
+    sims = matrix @ q / np.where(norms > 0, norms, 1.0)
+    best = np.full(len(embeddings), -np.inf)
+    np.maximum.at(best, np.asarray(owner), sims)
+    return list(1.0 - best)
 
 
 def get_node_list(node_dict: Dict[int, Node]) -> List[Node]:
