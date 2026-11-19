@@ -1,14 +1,17 @@
 import logging
 import os
+import threading
 from typing import Dict, List, Set
 
+import numpy as np
 import tiktoken
 from tenacity import retry, stop_after_attempt, wait_random_exponential
 
 from .EmbeddingModels import BaseEmbeddingModel, OpenAIEmbeddingModel
 from .Retrievers import BaseRetriever
 from .tree_structures import Node, Tree
-from .utils import (distances_from_embeddings, get_children, get_embeddings,
+from .utils import (SEGMENTS_SUFFIX, cosine_distances,
+                    distances_to_nearest_segment, get_children, get_embeddings,
                     get_node_list, get_text,
                     indices_of_nearest_neighbors_from_distances,
                     reverse_mapping)
@@ -106,6 +109,10 @@ class TreeRetrieverConfig:
 
 class TreeRetriever(BaseRetriever):
 
+    # A layer (or pool) of at least this many nodes is ranked with the matrix of the whole tree (see ``_distances_via_matrix``);
+    # shorter ones are stacked on the fly, which is cheaper than a product over every node of the tree.
+    LARGE_LAYER = 4096
+
     def __init__(self, config, tree) -> None:
         if not isinstance(tree, Tree):
             raise ValueError("tree must be an instance of Tree")
@@ -139,8 +146,9 @@ class TreeRetriever(BaseRetriever):
         self.context_embedding_model = config.context_embedding_model
 
         self.tree_node_index_to_layer = reverse_mapping(self.tree.layer_to_nodes)
-
-        self.sibling_cooccur = 0
+        self._matrix_lock = threading.Lock()
+        self._matrix = None
+        self._all_node_list = None
 
         logging.info(
             f"Successfully initialized TreeRetriever with Config {config.log_config()}"
@@ -158,13 +166,72 @@ class TreeRetriever(BaseRetriever):
         """
         return self.embedding_model.create_embedding(text)
 
-    def retrieve_information_collapse_tree(self, query: str, top_k: int, max_tokens: int) -> str:
+    def node_distances(self, query_embedding, node_list: List[Node]):
+        """Distances of the query to the nodes. A node with embeddings of several windows of its text (a text longer than
+        the encoder reads) is as close as its closest window; if no node has them this is the plain cosine distance.
+
+        The embeddings are assumed not to change after the first query: a large layer is ranked with a matrix of the whole
+        tree that is built once (build a new ``TreeRetriever`` after editing the embeddings of a tree)."""
+        if len(node_list) >= self.LARGE_LAYER:
+            distances = self._distances_via_matrix(query_embedding, node_list)
+            if distances is not None:
+                return distances
+        key = self.context_embedding_model
+        if not any(key + SEGMENTS_SUFFIX in n.embeddings for n in node_list):
+            return cosine_distances(query_embedding, get_embeddings(node_list, key))
+        return distances_to_nearest_segment(
+            query_embedding, [n.embeddings.get(key + SEGMENTS_SUFFIX, n.embeddings[key]) for n in node_list]
+        )
+
+    def _embedding_matrix(self):
+        """``(rows, starts, position)`` of the whole tree, built once: ``rows`` are the unit-length float32 embeddings (all
+        windows of a node next to each other), ``starts[i]`` the first row of the i-th node (by index) and ``position`` maps
+        a node index to ``i`` (-1: not in the tree)."""
+        if self._matrix is None:
+            with self._matrix_lock:
+                if self._matrix is None:
+                    key = self.context_embedding_model
+                    nodes = self._nodes_of_tree()
+                    parts = [np.atleast_2d(np.asarray(n.embeddings.get(key + SEGMENTS_SUFFIX, n.embeddings[key]),
+                                                      dtype=np.float32)) for n in nodes]
+                    lengths = np.fromiter((len(p) for p in parts), dtype=np.int64, count=len(parts))
+                    rows = np.concatenate(parts)
+                    norms = np.linalg.norm(rows, axis=1, keepdims=True)
+                    rows /= np.where(norms > 0, norms, 1.0)
+                    position = np.full(max(n.index for n in nodes) + 1, -1, dtype=np.int64)
+                    position[[n.index for n in nodes]] = np.arange(len(nodes))
+                    self._matrix = (rows, np.cumsum(lengths) - lengths, position, bool((lengths != 1).any()))
+        return self._matrix
+
+    def _nodes_of_tree(self) -> List[Node]:
+        """Every node of the tree sorted by index (built once)."""
+        if self._all_node_list is None:
+            self._all_node_list = get_node_list(self.tree.all_nodes)
+        return self._all_node_list
+
+    def _distances_via_matrix(self, query_embedding, node_list: List[Node]):
+        """Cosine distances (best window for a node with several) of a large layer: one matrix-vector product with every
+        embedding of the tree, then the rows of the layer are picked. numpy releases the GIL in it, and it costs the
+        same few milliseconds whichever layer is ranked, instead of one Python call per node. float32, so the ranking can
+        differ from the float64 computation only between distances that agree to about 1e-6. ``None``: not applicable."""
+        rows, starts, position, has_windows = self._embedding_matrix()
+        index = np.fromiter((n.index for n in node_list), dtype=np.int64, count=len(node_list))
+        if index.size == 0 or index.max() >= len(position) or (position[index] < 0).any():
+            return None                                                # a node that is not part of this tree
+        q = np.asarray(query_embedding, dtype=np.float32).ravel()
+        q = q / (np.linalg.norm(q) or 1.0)
+        sims = np.einsum("ij,j->i", rows, q)
+        best = np.maximum.reduceat(sims, starts) if has_windows else sims
+        return 1.0 - best[position[index]]
+
+    def retrieve_information_collapse_tree(self, query: str, top_k: int, max_tokens: int, node_list=None) -> str:
         """
         Retrieves the most relevant information from the tree based on the query.
 
         Args:
             query (str): The query text.
             max_tokens (int): The maximum number of tokens.
+            node_list (List[Node], optional): The nodes to rank (default: every node of the tree).
 
         Returns:
             str: The context created using the most relevant nodes.
@@ -174,11 +241,10 @@ class TreeRetriever(BaseRetriever):
 
         selected_nodes = []
 
-        node_list = get_node_list(self.tree.all_nodes)
+        if node_list is None:
+            node_list = self._nodes_of_tree()
 
-        embeddings = get_embeddings(node_list, self.context_embedding_model)
-
-        distances = distances_from_embeddings(query_embedding, embeddings)
+        distances = self.node_distances(query_embedding, node_list)
 
         indices = indices_of_nearest_neighbors_from_distances(distances)
 
@@ -198,7 +264,11 @@ class TreeRetriever(BaseRetriever):
         return selected_nodes, context
 
     def retrieve_information(
-        self, current_nodes: List[Node], query: str, num_layers: int
+        self,
+        current_nodes: List[Node],
+        query: str,
+        num_layers: int,
+        max_tokens: int = None,
     ) -> str:
         """
         Retrieves the most relevant information from the tree based on the query.
@@ -207,6 +277,8 @@ class TreeRetriever(BaseRetriever):
             current_nodes (List[Node]): A List of the current nodes.
             query (str): The query text.
             num_layers (int): The number of layers to traverse.
+            max_tokens (int, optional): Token budget of the returned context. Nodes are
+                kept in retrieval order (start layer first) until the budget is used up.
 
         Returns:
             str: The context created using the most relevant nodes.
@@ -220,9 +292,7 @@ class TreeRetriever(BaseRetriever):
 
         for layer in range(num_layers):
 
-            embeddings = get_embeddings(node_list, self.context_embedding_model)
-
-            distances = distances_from_embeddings(query_embedding, embeddings)
+            distances = self.node_distances(query_embedding, node_list)
 
             indices = indices_of_nearest_neighbors_from_distances(distances)
 
@@ -248,6 +318,16 @@ class TreeRetriever(BaseRetriever):
                 # take the unique values
                 child_nodes = list(dict.fromkeys(child_nodes))
                 node_list = [self.tree.all_nodes[i] for i in child_nodes]
+
+        if max_tokens is not None:
+            kept, total_tokens = [], 0
+            for node in selected_nodes:
+                node_tokens = len(self.tokenizer.encode(node.text))
+                if kept and total_tokens + node_tokens > max_tokens:
+                    break
+                kept.append(node)
+                total_tokens += node_tokens
+            selected_nodes = kept
 
         context = get_text(selected_nodes)
         return selected_nodes, context
@@ -307,23 +387,10 @@ class TreeRetriever(BaseRetriever):
             selected_nodes, context = self.retrieve_information_collapse_tree(
                 query, top_k, max_tokens
             )
-            # print(selected_nodes)
-            selected_node_idx = []
-            for node in selected_nodes:
-                # print(node.index, node.children)
-                selected_node_idx.append(node.index)
-            for node in selected_nodes:
-                num_child = len(node.children)
-                if num_child != 0:
-                    for i in range(num_child):
-                        if i in selected_node_idx:
-                            for j in range(i+1, num_child):
-                                if j in selected_node_idx:
-                                    self.sibling_cooccur += 1
         else:
             layer_nodes = self.tree.layer_to_nodes[start_layer]
             selected_nodes, context = self.retrieve_information(
-                layer_nodes, query, num_layers
+                layer_nodes, query, num_layers, max_tokens
             )
 
         if return_layer_information:

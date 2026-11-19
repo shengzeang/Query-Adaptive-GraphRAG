@@ -82,9 +82,11 @@ def perform_clustering(
     total_clusters = 0
 
     for i in range(n_global_clusters):
-        global_cluster_embeddings_ = embeddings[
-            np.array([i in gc for gc in global_clusters])
-        ]
+        # Track members by index. Upstream looked them up by comparing embedding values, which pulls in every
+        # node with an identical embedding (e.g. chunks that only differ after the encoder's max length), so such
+        # nodes were added to every cluster that contained any one of them (one chunk ended up in 1300 clusters).
+        member_idx = np.where(np.array([i in gc for gc in global_clusters]))[0]
+        global_cluster_embeddings_ = embeddings[member_idx]
         if verbose:
             logging.info(
                 f"Nodes in Global Cluster {i}: {len(global_cluster_embeddings_)}"
@@ -106,12 +108,7 @@ def perform_clustering(
             logging.info(f"Local Clusters in Global Cluster {i}: {n_local_clusters}")
 
         for j in range(n_local_clusters):
-            local_cluster_embeddings_ = global_cluster_embeddings_[
-                np.array([j in lc for lc in local_clusters])
-            ]
-            indices = np.where(
-                (embeddings == local_cluster_embeddings_[:, None]).all(-1)
-            )[1]
+            indices = member_idx[np.array([j in lc for lc in local_clusters])]
             for idx in indices:
                 all_local_clusters[idx] = np.append(
                     all_local_clusters[idx], j + total_clusters
@@ -130,6 +127,30 @@ class ClusteringAlgorithm(ABC):
         pass
 
 
+# Reclustering an over-long cluster can return the very same cluster again (e.g. GMM picks a single component),
+# which upstream RAPTOR retries forever (RecursionError). After this many reclusterings in a row that make no
+# progress, or this many levels in total, the cluster is split into consecutive groups of bounded length instead.
+MAX_STUCK_RECLUSTERS = 2
+MIN_RECLUSTER_NODES = 2
+MAX_RECLUSTER_DEPTH = 20
+
+
+def split_by_length(cluster_nodes: List[Node], tokenizer, max_length: int) -> List[List[Node]]:
+    """Consecutive groups of nodes whose total token count stays within ``max_length`` (a node that is longer
+    than that on its own forms its own group)."""
+    groups, current, current_len = [], [], 0
+    for node in cluster_nodes:
+        n = len(tokenizer.encode(node.text))
+        if current and current_len + n > max_length:
+            groups.append(current)
+            current, current_len = [], 0
+        current.append(node)
+        current_len += n
+    if current:
+        groups.append(current)
+    return groups
+
+
 class RAPTOR_Clustering(ClusteringAlgorithm):
     def perform_clustering(
         nodes: List[Node],
@@ -139,6 +160,8 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
         reduction_dimension: int = 10,
         threshold: float = 0.1,
         verbose: bool = False,
+        _depth: int = 0,
+        _stuck: int = 0,
     ) -> List[List[Node]]:
         # Get the embeddings from the nodes
         embeddings = np.array([node.embeddings[embedding_model_name] for node in nodes])
@@ -171,13 +194,24 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
 
             # If the total length exceeds the maximum allowed length, recluster this cluster
             if total_length > max_length_in_cluster:
+                stuck = _stuck + 1 if len(cluster_nodes) == len(nodes) else 0
+                # UMAP cannot embed 1-2 points (n_components = len - 2 < 1): such a cluster only exists when a few
+                # very long nodes already exceed the length limit, so it is split by length straight away.
+                if (len(cluster_nodes) <= MIN_RECLUSTER_NODES or stuck > MAX_STUCK_RECLUSTERS
+                        or _depth >= MAX_RECLUSTER_DEPTH):
+                    logging.warning(
+                        f"reclustering {len(cluster_nodes)} nodes makes no progress; splitting by length instead"
+                    )
+                    node_clusters.extend(split_by_length(cluster_nodes, tokenizer, max_length_in_cluster))
+                    continue
                 if verbose:
                     logging.info(
                         f"reclustering cluster with {len(cluster_nodes)} nodes"
                     )
                 node_clusters.extend(
                     RAPTOR_Clustering.perform_clustering(
-                        cluster_nodes, embedding_model_name, max_length_in_cluster
+                        cluster_nodes, embedding_model_name, max_length_in_cluster,
+                        _depth=_depth + 1, _stuck=stuck,
                     )
                 )
             else:

@@ -31,3 +31,12 @@ finetuning_ckpts/
 assertion.log
 *.log
 *.db
+# QA-GraphRAG: generated data, models and results
+data/
+checkpoints*/
+indexes*/
+outputs/
+*.pth
+*.pkl
+.env
+logs/

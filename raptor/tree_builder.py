@@ -5,7 +5,6 @@ from abc import abstractclassmethod
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Dict, List, Optional, Set, Tuple
-import torch
 
 import openai
 import tiktoken
@@ -18,7 +17,6 @@ from .tree_structures import Node, Tree
 from .utils import (distances_from_embeddings, get_children, get_embeddings,
                     get_node_list, get_text,
                     indices_of_nearest_neighbors_from_distances, split_text)
-# from .utils import precompute_kv
 
 # logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.ERROR)
@@ -153,6 +151,9 @@ class TreeBuilder:
         self.summarization_model = config.summarization_model
         self.embedding_models = config.embedding_models
         self.cluster_embedding_model = config.cluster_embedding_model
+        # Summarise the clusters of a layer concurrently. Only enable this for thread-safe
+        # (e.g. HTTP) summarisation models.
+        self.parallel_summaries = False
 
         logging.info(
             f"Successfully initialized TreeBuilder with Config {config.log_config()}"
@@ -271,6 +272,9 @@ class TreeBuilder:
         Returns:
             Tree: The golden tree structure.
         """
+        # ``construct_tree`` shrinks ``self.num_layers`` when the corpus is too small to
+        # cluster further. Remember the configured value so one builder can be reused.
+        configured_num_layers = self.num_layers
         chunks = split_text(text, self.tokenizer, self.max_tokens)
 
         logging.info("Creating Leaf Nodes")
@@ -291,12 +295,13 @@ class TreeBuilder:
 
         all_nodes = copy.deepcopy(leaf_nodes)
 
-        root_nodes = self.construct_tree(all_nodes, all_nodes, layer_to_nodes)
+        try:
+            root_nodes = self.construct_tree(all_nodes, all_nodes, layer_to_nodes)
+            built_layers = self.num_layers
+        finally:
+            self.num_layers = configured_num_layers
 
-        tree = Tree(all_nodes, root_nodes, leaf_nodes, self.num_layers, layer_to_nodes)
-
-        logging.info("Precomputing KV-cache for all chunks")
-        num_node = len(tree.all_nodes)
+        tree = Tree(all_nodes, root_nodes, leaf_nodes, built_layers, layer_to_nodes)
 
         return tree
 
@@ -374,71 +379,56 @@ class TreeBuilder:
 
         # return new_level_nodes
 
-# 合并多个Tree为一棵大Tree，根节点连接所有子树的根节点
 def merge_trees(trees):
     """
-    仅保留 horizontal 模式：创建一个新的根节点，作为所有独立树根的父节点（横向并列）。
+    Merge several independent trees into one tree "side by side": node indices are
+    re-assigned to avoid collisions and nodes of the same layer are concatenated in
+    ``layer_to_nodes``. No extra root node is created; the roots of all input trees
+    become the roots of the merged tree.
 
     Args:
-        trees (List[Tree]): 独立的 Tree 对象列表
+        trees (List[Tree]): independent trees (built with the same embedding model)
 
     Returns:
-        Tree: 合成后的大 Tree
+        Tree: the merged tree
     """
     if not trees:
-        raise ValueError("输入的树列表为空")
+        raise ValueError("The list of trees to merge is empty")
 
-    # 重新分配所有节点的 index，避免冲突
     all_nodes = {}
     layer_to_nodes = {}
-    index_offset = 0
+    leaf_nodes = {}
     root_nodes = []
+    index_offset = 0
     max_layer = 0
 
     for tree in trees:
-        if tree.num_layers > max_layer:
-            max_layer = tree.num_layers
+        max_layer = max(max_layer, tree.num_layers)
 
-        index_map = {}
-        # 重新分配 index 并复制节点
+        # re-index the nodes of this tree
         for old_idx, node in tree.all_nodes.items():
             new_idx = old_idx + index_offset
-            new_children = set([c + index_offset for c in node.children]) if node.children else set()
-            new_node = Node(node.text, new_idx, new_children, node.embeddings)
-            all_nodes[new_idx] = new_node
-            index_map[old_idx] = new_idx
+            new_children = {c + index_offset for c in node.children} if node.children else set()
+            all_nodes[new_idx] = Node(node.text, new_idx, new_children, node.embeddings)
 
-        # 处理 root_nodes（支持 Node 对象或索引）
-        for r in tree.root_nodes:
-            r_idx = r if isinstance(r, int) else getattr(r, "index", None)
-            if r_idx is None:
-                raise ValueError("无法解析 tree.root_nodes 中的元素为 index")
-            root_nodes.append(all_nodes[index_map[r_idx]])
+        def remap(n):
+            old = n if isinstance(n, int) else n.index
+            return all_nodes[old + index_offset]
 
-        # 合并 layer_to_nodes（水平并列：同一层号合并到一起）
+        root_nodes.extend(remap(r) for r in tree.root_nodes)
+
         for layer, nodes in tree.layer_to_nodes.items():
-            mapped_nodes = []
-            for n in nodes:
-                n_idx = n if isinstance(n, int) else getattr(n, "index", None)
-                if n_idx is None:
-                    raise ValueError("无法解析 layer_to_nodes 中的节点为 index")
-                mapped_nodes.append(all_nodes[index_map[n_idx]])
-            if layer in layer_to_nodes:
-                layer_to_nodes[layer].extend(mapped_nodes)
-            else:
-                layer_to_nodes[layer] = mapped_nodes
+            layer_to_nodes.setdefault(layer, []).extend(remap(n) for n in nodes)
+
+        for old_idx in tree.leaf_nodes:
+            leaf_nodes[old_idx + index_offset] = all_nodes[old_idx + index_offset]
 
         index_offset += max(tree.all_nodes.keys()) + 1
 
-    # 合并所有叶节点为列表（横向并列保留所有叶）
-    merged_leaf_indices = [idx for idx, node in all_nodes.items() if not node.children]
-
-    merged_tree = Tree(
+    return Tree(
         all_nodes=all_nodes,
         root_nodes=root_nodes,
-        leaf_nodes=merged_leaf_indices,
+        leaf_nodes=leaf_nodes,
         num_layers=max_layer,
         layer_to_nodes=layer_to_nodes,
     )
-
-    return merged_tree

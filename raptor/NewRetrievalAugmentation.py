@@ -159,6 +159,7 @@ class RetrieverConfig:
         # Assign the created configurations to the instance
         self.tree_retriever_config = tree_retriever_config
         self.qa_model = qa_model or GPT3TurboQAModel()
+        self.embedding_model = tr_embedding_model
 
     def log_config(self):
         config_summary = """
