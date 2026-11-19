@@ -13,17 +13,17 @@ from raptor.utils import get_node_list
 from . import EMB_KEY
 
 RETRIEVAL_MODES = ("collapse", "traverse")
-# How ``raptor`` and ``raptor-qa`` retrieve, chosen for the whole process: ``RETRIEVAL=traverse`` gives
-# the layer-by-layer descent of the first experiments (their results and the router labels were made with it).
-DEFAULT_RETRIEVAL = os.environ.get("RETRIEVAL", "collapse").strip() or "collapse"
+# How ``raptor`` and ``raptor-qa`` retrieve, chosen for the whole process: by default the layer-by-layer descent of the tree
+# (``traverse``); ``RETRIEVAL=collapse`` ranks the nodes of all layers 0..start level together instead.
+DEFAULT_RETRIEVAL = os.environ.get("RETRIEVAL", "traverse").strip() or "traverse"
 
 
 @dataclass
 class RetrievalSettings:
-    top_k: int = 5                  # one k for every method: nodes kept per layer by tree traversal, nodes kept in total
+    top_k: int = 10                 # one k for every method: nodes kept per layer by tree traversal, nodes kept in total
                                     # by the collapsed tree and by BM25 / TF-IDF (so level 0 and BM25 see equally many chunks)
     max_tokens: int = 3500          # token budget of the retrieved context
-    retrieval: str = DEFAULT_RETRIEVAL   # "collapse": top-k over the nodes of layers 0..start level; "traverse": descent from it
+    retrieval: str = DEFAULT_RETRIEVAL   # "traverse": descent from the start level; "collapse": top-k over the nodes of layers 0..start level
 
     def __post_init__(self):
         if self.retrieval not in RETRIEVAL_MODES:
@@ -51,6 +51,7 @@ class TreeIndex:
             selection_mode="top_k",
         )
         self.retriever = TreeRetriever(config, tree)
+        self._pools = {}                # start level -> the nodes of layers 0..level (collapse mode), built once
 
     @property
     def max_level(self) -> int:
@@ -84,8 +85,10 @@ class TreeIndex:
     def _collapse(self, query: str, level: Optional[int]):
         pool = None
         if level is not None and self.clamp(level) < self.max_level:
-            below = {n.index: n for k in range(self.clamp(level) + 1) for n in self.tree.layer_to_nodes[k]}
-            pool = get_node_list(below)
+            pool = self._pools.get(self.clamp(level))
+            if pool is None:
+                below = {n.index: n for k in range(self.clamp(level) + 1) for n in self.tree.layer_to_nodes[k]}
+                pool = self._pools[self.clamp(level)] = get_node_list(below)
         return self.retriever.retrieve_information_collapse_tree(
             query, self.settings.top_k, self.settings.max_tokens, node_list=pool
         )

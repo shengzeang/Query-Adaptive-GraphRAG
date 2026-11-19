@@ -38,8 +38,8 @@ class QueryRunner:
     """Answers one query with any of the compared retrieval strategies over a single corpus.
 
     * ``bm25`` / ``tfidf``  flat top-k over the leaf chunks
-    * ``raptor``            RAPTOR from the top layer. ``RetrievalSettings.retrieval`` (env ``RETRIEVAL``) decides how: "collapse"
-                            (default) = top-k over all nodes; "traverse" = layer-by-layer descent (= ``level<max_level>``)
+    * ``raptor``            RAPTOR from the top layer. ``RetrievalSettings.retrieval`` (env ``RETRIEVAL``) decides how: "traverse"
+                            (default) = layer-by-layer descent (= ``level<max_level>``); "collapse" = top-k over all nodes
     * ``raptor-collapsed``  RAPTOR's collapsed tree (top-k over all nodes) whatever the mode; not in the default method lists
     * ``level<k>``          fixed start level k, always by descent (diagnostics)
     * ``start<k>``          fixed start level k retrieved as ``raptor-qa`` does it, in the mode of ``settings.retrieval``: what a

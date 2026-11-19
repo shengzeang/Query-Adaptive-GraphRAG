@@ -2,12 +2,6 @@
 
 This repository contains the implementation of QA-GraphRAG based on RAPTOR in the paper *"QA-GraphRAG: Query-Adaptive Plug-and-Play Retrieval Integration for Graph-based Retrieval-Augmented Generation"*.
 
-## Idea in 30 seconds
-
-* RAPTOR builds a tree: level 0 = raw text chunks, higher levels = recursive summaries.
-* Level convention used in this code base: *retrieving from level k* means start at tree layer k, then descend to the leaves (context = layers k..0). Level 0 is plain chunk retrieval; higher levels add more abstract knowledge.
-* The **router** (`qa_graphrag/router.py`) is a 3-layer MLP on the query embedding that outputs a preference score per level. Training uses Gumbel-Softmax and the loss `1 - sum(P * Q~)` (paper Eq. 2), where `P` is the accuracy obtained when retrieval starts at each level. Inference is deterministic (`argmax`) and the query is routed once before a single retrieval.
-
 ## Layout
 
 ```
@@ -52,10 +46,10 @@ Embeddings (query, nodes, router input) use `sentence-transformers/all-MiniLM-L6
 
 ## Methods and settings that must stay consistent
 
-The router labels depend on `RETRIEVAL` and `TOP_K`. A router must be **trained and used with the same values** it was labelled with. Every label / result row records them (rows without the fields count as `traverse`/5), checkpoints store `retrieval` and `top_k`, and the scripts refuse to mix values in one output file and warn when a router is used with other settings. So give every combination its own directories:
+The defaults are `RETRIEVAL=traverse` (layer-by-layer descent of the tree), `TOP_K=10` and `BENCH_CHUNK=200`. The router labels depend on `RETRIEVAL` and `TOP_K`. A router must be **trained and used with the same values** it was labelled with. Every label / result row records them (rows without the fields count as `traverse`/5), checkpoints store `retrieval` and `top_k`, and the scripts refuse to mix values in one output file and warn when a router is used with other settings. So give every combination its own directories:
 
 ```bash
-RETRIEVAL=traverse TOP_K=10 DATA=data/router_t10 CKPT=checkpoints_t10 OUT_KGQA=outputs/kgqa_t10 OUT_BENCH=outputs/bench_t10 \
+RETRIEVAL=collapse TOP_K=5 DATA=data/router_collapse_k5 CKPT=checkpoints_collapse_k5 OUT_KGQA=outputs/kgqa_collapse_k5 OUT_BENCH=outputs/bench_collapse_k5 \
   bash scripts/run_all.sh labels train kgqa bench
 ```
 
@@ -94,7 +88,7 @@ when calling `run_kgqa.py` / `run_bench.py` directly). `KGQA_ROUTERS` / `BENCH_R
 
 * KGQA: `$OUT_KGQA/<dataset>.jsonl` (one row per question and method) and `<dataset>_summary.json`: Accuracy (gold answer contained in the output) and Recall (token recall) x100 per method, plus the distribution of levels chosen by the router.
 * GraphRAG-Bench: `$OUT_BENCH/<method>/` holds the predictions in the official format and `eval_details.json`;
-  `$OUT_BENCH/summary.json` the scores per task (rationale / answer / AR score, official protocol). `summary.json` is merged with an existing one, so partial runs add to it.
+  `$OUT_BENCH/summary.json` the scores per task (rationale / answer / AR score, official protocol; the log shows only the Answer score). `summary.json` is merged with an existing one, so partial runs add to it.
 
 ### Step by step, without `run_all.sh`
 
@@ -129,7 +123,18 @@ The `raptor/` package is the upstream code with these changes (the reproduction 
   `reduction_dimension=2`.
 * Clustering fixes: cluster members are index based (identical embeddings no longer duplicate texts), no `RecursionError` on pathological clusters (`split_by_length`, bounded re-clustering), UMAP `n_neighbors >= 2`, GMM `reg_covar=1e-5`.
 * `TreeBuilder`: parallel summaries (`parallel_summaries`), `merge_trees`, `num_layers` restored on load.
-* `TreeRetriever.node_distances` and `utils.distances_to_nearest_segment` (segment embeddings for long nodes).
+* `utils.distances_from_embeddings`: cosine distances are computed in a vectorized float64 batch rather than with one
+  SciPy call per node; the other distance metrics are unchanged. Numerical kernels release the GIL. `np.einsum` avoids
+  BLAS thread-pool overhead / oversubscription when many queries run concurrently.
+* `TreeRetriever.node_distances` and `utils.distances_to_nearest_segment`: long nodes are ranked by their closest window;
+  window similarities and per-node maxima are vectorized. Layers / pools with fewer than 4096 nodes are stacked on demand.
+* For layers / pools with at least 4096 nodes, `TreeRetriever` lazily builds a normalized float32 matrix of the whole tree
+  once, under a lock, and reuses it across queries. All windows of a node are stored together. Near-ties can rank differently
+  from float64 because of rounding. The matrix adds about 193 MB for a 124.5k-node, 384-dimensional tree (more with extra
+  windows), shared by threads of the same retriever but not by processes. The first large query pays the construction cost;
+  create a new `TreeRetriever` after changing tree embeddings. The sorted all-node list is also cached.
+* `qa_graphrag.retrieval.TreeIndex` caches each collapse pool (layers 0 through the chosen level) instead of rebuilding it
+  for every query. Both traversal and collapse benefit from the vectorized ranking above.
 * `raptor/NewRetrievalAugmentation.py`: `Builder` / `Retriever` with `BuilderConfig` / `RetrieverConfig` used by `qa_graphrag`.
 
 ### Notes

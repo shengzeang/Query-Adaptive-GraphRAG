@@ -93,7 +93,7 @@ def score(args, methods):
         summary[method] = {"total": result["total"], **{t: v for t, v in result["by_type"].items()}}
         print(f"\n== {method}")
         for name, v in summary[method].items():
-            print(f"  {name:6s} AR {100*v['ar_score']:.2f}  Answer {100*v['answer_score']:.2f}  Rationale {100*v['rationale_score']:.2f}  (n={v['count']})")
+            print(f"  {name:6s} Answer {100*v['answer_score']:.2f}  (n={v['count']})")
     summary_path = Path(args.out) / "summary.json"
     if summary_path.exists():      # keep the methods of earlier invocations on the same --out (e.g. routers added later)
         summary = {**json.loads(summary_path.read_text()), **summary}

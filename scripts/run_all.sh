@@ -24,8 +24,8 @@
 #   bench       Table 5: RAPTOR / RAPTOR-QA, generation for FB/MC/MS/TF/OE + official scoring (judge = DeepSeek flash)
 #
 # Common switches (environment variables; see the comments below and README.md):
-#   RETRIEVAL=collapse|traverse   how raptor / raptor-qa retrieve (default collapse); labels, checkpoints and results depend on it
-#   TOP_K=5                       nodes per layer (traverse) / in total (collapse, BM25, TF-IDF); same dependency as RETRIEVAL
+#   RETRIEVAL=traverse|collapse   how raptor / raptor-qa retrieve (default traverse); labels, checkpoints and results depend on it
+#   TOP_K=10                      nodes per layer (traverse) / in total (collapse, BM25, TF-IDF); same dependency as RETRIEVAL
 #   DATA / CKPT / OUT_KGQA / OUT_BENCH   directories of labels / checkpoints / KGQA results / bench results
 #   KGQA_METHODS / KGQA_ROUTERS   methods of the kgqa stage (default "raptor raptor-qa"; add the BM25 / TF-IDF baselines with
 #                                 KGQA_METHODS="bm25 tfidf raptor raptor-qa"); KGQA_ROUTERS: name=checkpoint pairs,
@@ -77,10 +77,9 @@ export JUDGE_MODEL="${JUDGE_MODEL:-deepseek-flash}"
 PY="${PY:-python}"
 CORES="$(nproc 2>/dev/null || echo 8)"
 BENCH_CHUNK="${BENCH_CHUNK:-200}"    # chunk size (tokens) of the GraphRAG-Bench tree; the KGQA / router trees use 100
-# TOP_K: nodes kept per layer by tree traversal, and in total by the collapsed tree / BM25 / TF-IDF (default 5, the value of the
-# first experiments). It changes the router labels, so labels / checkpoints / results of another TOP_K need their own DATA, CKPT,
+# TOP_K: nodes kept per layer by tree traversal, and in total by the collapsed tree / BM25 / TF-IDF (default 10). It changes the router labels, so labels / checkpoints / results of another TOP_K need their own DATA, CKPT,
 # OUT_KGQA and OUT_BENCH (the scripts refuse to mix them); the cached trees do not depend on it.
-TOP_K="${TOP_K:-5}"
+TOP_K="${TOP_K:-10}"
 # context budget of the bench runs: room for TOP_K leaves of BENCH_CHUNK tokens plus 2 x TOP_K summaries (~100 tokens each) and some
 # slack, never below the KGQA 3500 (TOP_K=5, BENCH_CHUNK=1200 -> 7500 tokens; TOP_K=10 -> 14500)
 BENCH_MAX_TOKENS="${BENCH_MAX_TOKENS:-$(( TOP_K * (BENCH_CHUNK + 200) + 500 > 3500 ? TOP_K * (BENCH_CHUNK + 200) + 500 : 3500 ))}"
@@ -127,10 +126,10 @@ else
 fi
 suffix() { [[ -n "$RUN" ]] && echo "_$RUN" || true; }
 # DATA / CKPT / OUT_KGQA / OUT_BENCH can be overridden, e.g. CKPT=checkpoints_t10 OUT_BENCH=outputs/bench_t10_c1200
-# RETRIEVAL (also read by the python code): how raptor / raptor-qa retrieve, collapse (default) | traverse (the first experiments);
+# RETRIEVAL (also read by the python code): how raptor / raptor-qa retrieve, traverse (default) | collapse;
 # one output directory must not mix them either (bm25 / tfidf rows are not affected). The router labels (`labels`),
-# the checkpoints and the KGQA results depend on it too: with the default (collapse) they go to their own directories, e.g.
-#   DATA=data/router_collapse CKPT=checkpoints_collapse OUT_KGQA=outputs/kgqa_collapse bash scripts/run_all.sh labels train kgqa
+# the checkpoints and the KGQA results depend on it too: another mode (or TOP_K) needs its own directories, e.g.
+#   RETRIEVAL=collapse DATA=data/router_collapse CKPT=checkpoints_collapse OUT_KGQA=outputs/kgqa_collapse bash scripts/run_all.sh labels train kgqa
 # (the cached trees in $IDX do not depend on it and are reused: only the answers are generated again)
 DATA="${DATA:-data/router$(suffix)}"; CKPT="${CKPT:-checkpoints$(suffix)}"; IDX="indexes$(suffix)"
 OUT_KGQA="${OUT_KGQA:-outputs/kgqa$(suffix)}"; OUT_BENCH="${OUT_BENCH:-outputs/bench$(suffix)}"

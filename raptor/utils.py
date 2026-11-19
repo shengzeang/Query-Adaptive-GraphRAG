@@ -129,12 +129,29 @@ def distances_from_embeddings(
             f"Unsupported distance metric '{distance_metric}'. Supported metrics are: {list(distance_metrics.keys())}"
         )
 
+    if distance_metric == "cosine":
+        return cosine_distances(query_embedding, embeddings).tolist()
+
     distances = [
         distance_metrics[distance_metric](query_embedding, embedding)
         for embedding in embeddings
     ]
 
     return distances
+
+
+def cosine_distances(query_embedding, embeddings) -> np.ndarray:
+    """Cosine distance of the query to every embedding with one matrix product instead of one scipy call per embedding.
+    Same values as ``scipy.spatial.distance.cosine`` (clipped to [0, 2], nan for a zero vector); numpy releases the GIL in
+    the product, so concurrent queries do not queue up behind a Python loop."""
+    if len(embeddings) == 0:
+        return np.empty(0)
+    q = np.asarray(query_embedding, dtype=np.float64).ravel()
+    matrix = np.asarray(embeddings, dtype=np.float64)
+    matrix = matrix.reshape(len(matrix), -1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        sims = np.einsum("ij,j->i", matrix, q) / (np.linalg.norm(matrix, axis=1) * np.linalg.norm(q))
+    return np.clip(1.0 - sims, 0.0, 2.0)
 
 
 # A node whose text is longer than the encoder reads keeps one embedding per window of its text under
@@ -146,18 +163,18 @@ def distances_to_nearest_segment(query_embedding, embeddings) -> List[float]:
     """Cosine distance between a query and nodes that have one embedding (1-d) or several (2-d, one per window of the
     text): ``1 - max cosine`` over the windows, i.e. the query is compared with every window and the best one counts.
     For nodes with a single vector this is the plain cosine distance."""
+    if len(embeddings) == 0:
+        return []
     q = np.asarray(query_embedding, dtype=np.float64).ravel()
     q = q / (np.linalg.norm(q) or 1.0)
-    rows, owner = [], []
-    for i, emb in enumerate(embeddings):
-        m = np.atleast_2d(np.asarray(emb, dtype=np.float64))
-        rows.append(m)
-        owner.extend([i] * len(m))
-    matrix = np.vstack(rows)
+    parts = [np.atleast_2d(np.asarray(emb, dtype=np.float64)) for emb in embeddings]
+    lengths = np.fromiter((len(p) for p in parts), dtype=np.int64, count=len(parts))
+    matrix = np.concatenate(parts)
     norms = np.linalg.norm(matrix, axis=1)
-    sims = matrix @ q / np.where(norms > 0, norms, 1.0)
-    best = np.full(len(embeddings), -np.inf)
-    np.maximum.at(best, np.asarray(owner), sims)
+    sims = np.einsum("ij,j->i", matrix, q) / np.where(norms > 0, norms, 1.0)
+    starts = np.minimum(np.cumsum(lengths) - lengths, len(sims) - 1)
+    best = np.maximum.reduceat(sims, starts)              # best window of every node (the windows of a node are adjacent)
+    best[lengths == 0] = -np.inf                          # a node without any window is infinitely far
     return list(1.0 - best)
 
 

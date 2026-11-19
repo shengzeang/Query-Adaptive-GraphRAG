@@ -215,16 +215,16 @@ def test_one_top_k_for_every_method_and_raptor_is_the_top_level_traversal(tree_a
     top = runner.retrieve(f"level{index.max_level}", q)[0]
     raptor = runner.retrieve("raptor", q)[0]
     assert (raptor.context, raptor.level, raptor.num_nodes) == (top.context, index.max_level, top.num_nodes)
-    assert RetrievalSettings().top_k == 5                                           # the value the existing labels were made with
+    assert RetrievalSettings().top_k == 10                                          # the default top-k
 
 
-def test_collapse_is_the_default_retrieval_of_raptor_and_raptor_qa(tree_and_encoder):
+def test_collapse_retrieval_of_raptor_and_raptor_qa(tree_and_encoder):
     import os
     tree, enc = tree_and_encoder
     q = "What is the capital of Country7?"
     layer_of = {n.index: k for k, nodes in tree.layer_to_nodes.items() for n in nodes}
     if "RETRIEVAL" not in os.environ:
-        assert RetrievalSettings().retrieval == "collapse"
+        assert RetrievalSettings().retrieval == "traverse"                          # the default; collapse is chosen below
     index = TreeIndex(tree, enc, RetrievalSettings(top_k=4, max_tokens=3500, retrieval="collapse"))
     runner = QueryRunner(index, EchoLLM(), MLPRouter(RouterConfig(enc.dim, index.max_level + 1)))
     whole = index.retrieve_collapsed(q)
@@ -389,6 +389,104 @@ def test_tree_retriever_ranks_a_node_by_its_best_window(tree_and_encoder):
     finally:
         del other.embeddings[SEGMENTS_KEY]
     assert TreeIndex(tree, enc, RetrievalSettings(top_k=1)).retrieve_from_level(query, 0).context == before   # no segments: the original ranking
+
+
+def test_cosine_distances_are_the_scipy_values():
+    from scipy import spatial
+
+    from raptor.utils import cosine_distances, distances_from_embeddings
+
+    rng = np.random.default_rng(0)
+    q = rng.normal(size=16)
+    embs = [rng.normal(size=16).astype(np.float32) for _ in range(50)] + [np.zeros(16), 3 * q]
+    expected = [spatial.distance.cosine(q, e) for e in embs]
+    assert np.allclose(cosine_distances(q, embs), expected, equal_nan=True, atol=1e-9)
+    assert np.isnan(cosine_distances(q, embs)[-2]) and np.isnan(expected[-2])                  # a zero vector: nan as before
+    assert distances_from_embeddings(q, [list(e) for e in embs[:5]]) == pytest.approx(expected[:5])   # plain lists, returns a list
+    assert isinstance(distances_from_embeddings(q, embs[:3]), list)
+    assert len(cosine_distances(q, [])) == 0 and distances_from_embeddings(q, []) == []
+    assert np.allclose(distances_from_embeddings(q, embs[:5], "L2"), [spatial.distance.euclidean(q, e) for e in embs[:5]])
+
+
+def test_nearest_segment_distances_with_many_nodes_and_empty_nodes():
+    from raptor.utils import distances_to_nearest_segment
+
+    rng = np.random.default_rng(1)
+    q = rng.normal(size=8)
+    embs = [rng.normal(size=8) if i % 3 else rng.normal(size=(1 + i % 4, 8)) for i in range(300)]
+    cos = lambda a, b: a @ b / np.linalg.norm(a) / np.linalg.norm(b)
+    expected = [1 - max(cos(q, w) for w in np.atleast_2d(e)) for e in embs]
+    assert np.allclose(distances_to_nearest_segment(q, embs), expected)
+    assert distances_to_nearest_segment(q, []) == []
+    assert distances_to_nearest_segment(q, [embs[1], np.empty((0, 8)), embs[2]])[1] == np.inf
+
+
+def _big_layer_tree(n=600, dim=12, seed=0, windows_every=7):
+    """A tree of one big layer and a small one (nodes with several windows every ``windows_every``)."""
+    from raptor import Node, Tree
+    from qa_graphrag import SEGMENTS_KEY
+
+    rng = np.random.default_rng(seed)
+    nodes = {}
+    for i in range(n):
+        emb = {EMB_KEY: rng.normal(size=dim).astype(np.float32)}
+        if i % windows_every == 0:
+            emb[SEGMENTS_KEY] = rng.normal(size=(2 + i % 3, dim)).astype(np.float32)
+        nodes[i] = Node(f"leaf {i}", i, set(), emb)
+    parents = {}
+    for j in range(40):
+        idx = n + j
+        parents[idx] = Node(f"summary {j}", idx, set(range(j * 15, j * 15 + 15)), {EMB_KEY: rng.normal(size=dim).astype(np.float32)})
+    all_nodes = {**nodes, **parents}
+    return Tree(all_nodes, list(parents.values()), list(nodes.values()), 1, {0: list(nodes.values()), 1: list(parents.values())})
+
+
+def test_large_layers_are_ranked_with_the_tree_matrix_like_the_plain_computation():
+    from raptor import Node, TreeRetriever, TreeRetrieverConfig
+
+    tree = _big_layer_tree()
+    cfg = TreeRetrieverConfig(embedding_model=object.__new__(HashEncoder), context_embedding_model=EMB_KEY, top_k=10, selection_mode="top_k")
+    matrix_retriever = TreeRetriever(cfg, tree)
+    plain_retriever = TreeRetriever(cfg, tree)
+    plain_retriever.LARGE_LAYER = 10 ** 9                                       # never uses the matrix
+    matrix_retriever.LARGE_LAYER = 100
+    rng = np.random.default_rng(5)
+    for layer_nodes in (tree.layer_to_nodes[0], tree.layer_to_nodes[1], tree.layer_to_nodes[0][::3], list(tree.all_nodes.values())):
+        for _ in range(5):
+            q = rng.normal(size=12).astype(np.float32)
+            a = np.asarray(matrix_retriever.node_distances(q, layer_nodes))
+            b = np.asarray(plain_retriever.node_distances(q, layer_nodes))
+            assert a.shape == b.shape == (len(layer_nodes),) and np.allclose(a, b, atol=1e-5)
+            assert list(np.argsort(a)[:10]) == list(np.argsort(b)[:10])           # the same top-k
+    assert matrix_retriever._matrix is not None and plain_retriever._matrix is None   # built lazily, only when a large layer is ranked
+    foreign = [Node("x", 10 ** 6, set(), {EMB_KEY: np.ones(12, dtype=np.float32)})] * 150      # not part of the tree: plain path
+    assert np.allclose(matrix_retriever.node_distances(q, foreign), 1 - 1 / np.sqrt(12) * (q.sum() / np.linalg.norm(q)), atol=1e-5)
+
+
+def test_retrieval_of_a_big_tree_is_the_same_with_and_without_the_matrix():
+    from raptor import TreeRetriever, TreeRetrieverConfig
+
+    tree = _big_layer_tree(n=900, seed=3)
+    q = np.random.default_rng(9).normal(size=12).astype(np.float32)
+    texts = {}
+    for name, limit in (("matrix", 100), ("plain", 10 ** 9)):
+        cfg = TreeRetrieverConfig(embedding_model=object.__new__(HashEncoder), context_embedding_model=EMB_KEY, top_k=10, selection_mode="top_k")
+        r = TreeRetriever(cfg, tree)
+        r.LARGE_LAYER = limit
+        r.create_embedding = lambda _text, q=q: q
+        nodes, ctx = r.retrieve_information_collapse_tree("q", 10, 100000)
+        nodes2, ctx2 = r.retrieve_information(tree.layer_to_nodes[1], "q", 2, 100000)
+        texts[name] = (ctx, ctx2, [n.index for n in nodes], [n.index for n in nodes2])
+    assert texts["matrix"] == texts["plain"]
+
+
+def test_tree_index_builds_each_collapse_pool_once(tree_and_encoder):
+    tree, enc = tree_and_encoder
+    index = TreeIndex(tree, enc, RetrievalSettings(top_k=4, max_tokens=3500, retrieval="collapse"))
+    q = "capital Country7 City7"
+    first = index.retrieve_start(q, 0)
+    pools = dict(index._pools)
+    assert set(pools) == {0} and index.retrieve_start(q, 0).context == first.context and index._pools[0] is pools[0]
 
 
 def test_builder_stores_windows_only_for_texts_that_do_not_fit():
